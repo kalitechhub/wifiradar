@@ -12,6 +12,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
+from . import api_wigle
+
 
 @dataclass
 class Cluster:
@@ -26,6 +28,7 @@ class Cluster:
     rssi_history: List[float] = field(default_factory=list)
     session_ids: Set[str] = field(default_factory=set)
     confidence_score: float = 0.0
+    locations: Dict[str, Dict[str, float]] = field(default_factory=dict)
 
     # Keep RSSI history bounded to avoid unbounded memory growth
     _MAX_RSSI = 500
@@ -43,8 +46,14 @@ class Cluster:
             "rssi_history":      self.rssi_history[-self._MAX_RSSI:],
             "session_ids":       sorted(self.session_ids),
             "confidence_score":  round(self.confidence_score, 2),
+            "locations":         self.locations,
         }
 
+def _resolve_ssid_bg(ssid: str, cluster: Cluster):
+    loc = api_wigle.resolve_ssid(ssid)
+    if loc:
+        # Atomic dictionary update
+        cluster.locations[ssid] = loc
 
 class DeviceClusterEngine:
     """
@@ -99,7 +108,10 @@ class DeviceClusterEngine:
             if mac:
                 cluster.observed_macs.add(mac)
             if ssid:
-                cluster.seen_ssids.add(ssid)
+                if ssid not in cluster.seen_ssids:
+                    cluster.seen_ssids.add(ssid)
+                    # Trigger background resolution for new SSIDs
+                    threading.Thread(target=_resolve_ssid_bg, args=(ssid, cluster), daemon=True).start()
             if rssi is not None:
                 cluster.rssi_history.append(rssi)
                 if len(cluster.rssi_history) > Cluster._MAX_RSSI:

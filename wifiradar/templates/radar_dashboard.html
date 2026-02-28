@@ -5,6 +5,13 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Wi-Fi Radar — Live Dashboard</title>
+
+  <!-- Leaflet map CSS and JS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
   <style>
     :root {
       --bg: #0a0e14;
@@ -354,6 +361,7 @@
       Sessions</div>
     <div class="tab" data-tab="detections" data-tooltip="View the raw stream of intercepted Wi-Fi probes and beacons.">
       Detections</div>
+    <div class="tab" data-tab="map" data-tooltip="Interactive Geographic Map of SSIDs">Map</div>
   </div>
 
   <!-- CLUSTERS PANEL -->
@@ -432,6 +440,11 @@
     </div>
   </div>
 
+  <!-- MAP PANEL -->
+  <div class="panel" id="panel-map">
+    <div id="leaflet-map" style="height: 600px; width: 100%; border-radius: 8px;"></div>
+  </div>
+
   <div class="footer">Wi-Fi Radar · Lab-only RF Research · Dashboard auto-refreshes every 3 seconds</div>
 
   <div id="custom-tooltip"></div>
@@ -482,6 +495,10 @@
       $$('.panel').forEach(x => x.classList.remove('active'));
       t.classList.add('active');
       $(`#panel-${t.dataset.tab}`).classList.add('active');
+
+      if (t.dataset.tab === 'map' && map) {
+        setTimeout(() => map.invalidateSize(), 50);
+      }
     }));
 
     // --- Helpers ---
@@ -512,7 +529,7 @@
       let cls = 'conf-low';
       if (v >= 60) cls = 'conf-high';
       else if (v >= 30) cls = 'conf-med';
-      return `<span class="conf ${cls}">${v.toFixed(1)}%</span>`;
+      return `<span class="conf-badge ${cls}">${v.toFixed(1)}%</span>`;
     }
 
     function pills(arr, cls) {
@@ -533,8 +550,12 @@
       } catch { return null; }
     }
 
+    // --- Main Refresh Loop ---
+    let map;
+    let markersLayer;
+
     async function refresh() {
-      // Stats
+      // General Stats
       const stats = await fetchJSON('/api/stats');
       if (stats) {
         $('#s-clusters').textContent = stats.total_clusters;
@@ -558,15 +579,42 @@
           .sort((a, b) => (b.confidence_score || 0) - (a.confidence_score || 0))
           .map(c => `<tr>
         <td>${c.cluster_id}</td>
-        <td title="${c.fingerprint_hash}">${shortHash(c.fingerprint_hash)}</td>
+        <td><span class="conf-badge conf-high">${shortHash(c.fingerprint_hash)}</span></td>
         <td>${confBadge(c.confidence_score)}</td>
         <td>${c.hit_count}</td>
         <td>${pills(c.observed_macs, 'mac-pill')}</td>
         <td>${pills(c.seen_ssids, 'ssid-pill')}</td>
-        <td>${(c.session_ids || []).length}</td>
+        <td>${c.session_ids ? c.session_ids.length : 0}</td>
         <td>${fmtTime(c.first_seen)}</td>
         <td>${fmtTime(c.last_seen)}</td>
       </tr>`).join('');
+
+        // Map updates
+        if (!map) {
+          map = L.map('leaflet-map').setView([20, 0], 2);
+          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors',
+            maxZoom: 19
+          }).addTo(map);
+          markersLayer = L.layerGroup().addTo(map);
+        }
+
+        markersLayer.clearLayers();
+        cd.clusters.forEach(c => {
+          if (c.locations) {
+            for (const [ssid, locData] of Object.entries(c.locations)) {
+              const locs = Array.isArray(locData) ? locData : [locData];
+              locs.forEach(loc => {
+                if (loc.lat && loc.lon && loc.lat !== 999.0) {
+                  const marker = L.marker([loc.lat, loc.lon])
+                    .bindPopup(`<b>SSID:</b> ${ssid}<br><b>Cluster:</b> ${c.cluster_id}`);
+                  markersLayer.addLayer(marker);
+                }
+              });
+            }
+          }
+        });
+
       } else {
         ct.parentElement.parentElement.style.display = 'none';
         ce.style.display = '';

@@ -93,6 +93,10 @@ def ensure_dependencies():
     try:
         import flask
     except ImportError: pip_missing.append("flask")
+    
+    try:
+        import requests
+    except ImportError: pip_missing.append("requests")
 
     if pip_missing:
         print(f"[install] Missing python packages: {pip_missing}. Installing now...")
