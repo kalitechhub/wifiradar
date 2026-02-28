@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Wi-Fi Radar — Live Dashboard</title>
+  <style>
+    :root {
+      --bg: #0a0e14;
+      --surface: #121820;
+      --surface2: #1a2230;
+      --border: #1e2a3a;
+      --text: #c8d4e0;
+      --text-dim: #6b7f95;
+      --accent: #00e5ff;
+      --accent2: #7c4dff;
+      --green: #00e676;
+      --amber: #ffab00;
+      --red: #ff1744;
+      --mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', monospace;
+      --sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 14px;
+      overflow-x: hidden;
+    }
+
+    /* Header */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(180deg, #0d1218 0%, var(--bg) 100%);
+    }
+
+    .header h1 {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+    }
+
+    .header h1 span {
+      color: var(--accent);
+    }
+
+    .header .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text-dim);
+    }
+
+    .header .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+
+      0%,
+      100% {
+        opacity: 1
+      }
+
+      50% {
+        opacity: .4
+      }
+    }
+
+    /* Stats bar */
+    .stats-bar {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 12px;
+      padding: 16px 24px;
+    }
+
+    .stat-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 16px;
+      text-align: center;
+    }
+
+    .stat-card .val {
+      font-size: 28px;
+      font-weight: 800;
+      font-family: var(--mono);
+      color: var(--accent);
+    }
+
+    .stat-card .lbl {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text-dim);
+      margin-top: 4px;
+    }
+
+    /* Tabs */
+    .tabs {
+      display: flex;
+      gap: 0;
+      padding: 0 24px;
+      border-bottom: 1px solid var(--border);
+      margin-top: 8px;
+    }
+
+    .tab {
+      padding: 10px 20px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      color: var(--text-dim);
+      border-bottom: 2px solid transparent;
+      transition: all .2s;
+    }
+
+    .tab:hover {
+      color: var(--text);
+    }
+
+    .tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+
+    /* Panels */
+    .panel {
+      display: none;
+      padding: 16px 24px;
+    }
+
+    .panel.active {
+      display: block;
+    }
+
+    /* Tables */
+    .tbl-wrap {
+      overflow-x: auto;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      font-family: var(--mono);
+    }
+
+    th {
+      background: var(--surface2);
+      color: var(--accent);
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 10px;
+      letter-spacing: 1px;
+      padding: 10px 12px;
+      text-align: left;
+      position: sticky;
+      top: 0;
+    }
+
+    td {
+      padding: 8px 12px;
+      border-top: 1px solid var(--border);
+      white-space: nowrap;
+    }
+
+    tr:hover td {
+      background: var(--surface);
+    }
+
+    /* Confidence badge */
+    .conf {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .conf-high {
+      background: rgba(0, 230, 118, .15);
+      color: var(--green);
+    }
+
+    .conf-med {
+      background: rgba(255, 171, 0, .15);
+      color: var(--amber);
+    }
+
+    .conf-low {
+      background: rgba(255, 23, 68, .12);
+      color: var(--red);
+    }
+
+    /* MAC pills */
+    .mac-pill {
+      display: inline-block;
+      background: var(--surface2);
+      border-radius: 4px;
+      padding: 1px 6px;
+      font-size: 11px;
+      margin: 1px 2px;
+      color: var(--text);
+    }
+
+    .ssid-pill {
+      display: inline-block;
+      background: rgba(124, 77, 255, .12);
+      border-radius: 4px;
+      padding: 1px 6px;
+      font-size: 11px;
+      margin: 1px 2px;
+      color: var(--accent2);
+    }
+
+    /* Scrollable table body */
+    .tbl-scroll {
+      max-height: 55vh;
+      overflow-y: auto;
+    }
+
+    /* Footer */
+    .footer {
+      padding: 12px 24px;
+      text-align: center;
+      font-size: 11px;
+      color: var(--text-dim);
+      border-top: 1px solid var(--border);
+      margin-top: 16px;
+    }
+
+    /* Empty state */
+    .empty {
+      text-align: center;
+      padding: 48px;
+      color: var(--text-dim);
+      font-size: 15px;
+    }
+
+    .empty .ico {
+      font-size: 40px;
+      margin-bottom: 12px;
+    }
+
+    /* Responsive */
+    @media (max-width:768px) {
+      .stats-bar {
+        grid-template-columns: repeat(2, 1fr);
+      }
+
+      .header h1 {
+        font-size: 16px;
+      }
+    }
+
+    /* Tooltips */
+    [data-tooltip] {
+      cursor: help;
+    }
+
+    #custom-tooltip {
+      position: fixed;
+      background: var(--surface2);
+      color: var(--text);
+      padding: 8px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      font-size: 12px;
+      font-family: var(--sans);
+      white-space: normal;
+      width: max-content;
+      max-width: 300px;
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.1s ease;
+      z-index: 9999;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+      pointer-events: none;
+    }
+
+    #custom-tooltip.visible {
+      opacity: 1;
+      visibility: visible;
+    }
+  </style>
+</head>
+
+<body>
+
+  <div class="header">
+    <h1>📡 Wi-Fi <span>Radar</span> — Live Dashboard</h1>
+    <div class="status" data-tooltip="Real-time capture status and uptime of the radar engine">
+      <div class="dot"></div>
+      <span id="uptime">--:--:--</span>
+      <span>· Channel <span id="current-channel" style="color:var(--accent); font-weight:bold;">?</span></span>
+      <span>· Refreshing every 3s</span>
+    </div>
+  </div>
+
+  <div class="stats-bar">
+    <div class="stat-card" data-tooltip="Groups of packets that likely came from the same physical device.">
+      <div class="val" id="s-clusters">0</div>
+      <div class="lbl">Clusters</div>
+    </div>
+    <div class="stat-card" data-tooltip="Number of distinct MAC addresses seen in the packets.">
+      <div class="val" id="s-macs">0</div>
+      <div class="lbl">Unique MACs</div>
+    </div>
+    <div class="stat-card" data-tooltip="Number of different Wi-Fi network names (SSIDs) detected.">
+      <div class="val" id="s-ssids">0</div>
+      <div class="lbl">Unique SSIDs</div>
+    </div>
+    <div class="stat-card" data-tooltip="Periods of continuous activity recorded for a single device.">
+      <div class="val" id="s-sessions">0</div>
+      <div class="lbl">Sessions</div>
+    </div>
+    <div class="stat-card" data-tooltip="Total number of management packets captured by the radar.">
+      <div class="val" id="s-hits">0</div>
+      <div class="lbl">Total Hits</div>
+    </div>
+    <div class="stat-card" data-tooltip="Clusters we are highly confident genuinely represent one distinct device."
+      style="border-color:#00e67633">
+      <div class="val" id="s-hiconf" style="color:#00e676">0</div>
+      <div class="lbl">High Confidence</div>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="clusters"
+      data-tooltip="View distinct devices deduced from MAC address and fingerprint correlation.">Clusters</div>
+    <div class="tab" data-tab="sessions" data-tooltip="View time periods of continuous activity for clustered devices.">
+      Sessions</div>
+    <div class="tab" data-tab="detections" data-tooltip="View the raw stream of intercepted Wi-Fi probes and beacons.">
+      Detections</div>
+  </div>
+
+  <!-- CLUSTERS PANEL -->
+  <div class="panel active" id="panel-clusters">
+    <div class="tbl-wrap">
+      <div class="tbl-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th data-tooltip="Unique ID representing this logical device cluster.">#</th>
+              <th data-tooltip="A hash created from recurring Wi-Fi probe Information Elements (IEs).">Fingerprint</th>
+              <th data-tooltip="Calculated confidence score that this is a single physical device.">Confidence</th>
+              <th data-tooltip="Total number of packets linked to this cluster.">Hits</th>
+              <th data-tooltip="List of physical MAC addresses seen mimicking this entity (e.g. random MACs).">MACs</th>
+              <th data-tooltip="Wi-Fi networks this device has probed for.">SSIDs</th>
+              <th data-tooltip="Number of distinct periods of continuous activity.">Sessions</th>
+              <th data-tooltip="Time of first observed packet for this cluster.">First Seen</th>
+              <th data-tooltip="Time of most recent observed packet for this cluster.">Last Seen</th>
+            </tr>
+          </thead>
+          <tbody id="tbl-clusters"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="empty" id="empty-clusters" style="display:none">
+      <div class="ico">📡</div>Waiting for cluster data…
+    </div>
+  </div>
+
+  <!-- SESSIONS PANEL -->
+  <div class="panel" id="panel-sessions">
+    <div class="tbl-wrap">
+      <div class="tbl-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th data-tooltip="Unique identifier for this tracking session.">Session ID</th>
+              <th data-tooltip="MAC addresses involved during this session.">MACs</th>
+              <th data-tooltip="Device fingerprints seen making requests during this session.">Fingerprints</th>
+              <th data-tooltip="When the first packet of the session was seen.">Start</th>
+              <th data-tooltip="When the last packet of the session was seen.">End</th>
+              <th data-tooltip="Calculated length of the device's continuous presence.">Duration</th>
+            </tr>
+          </thead>
+          <tbody id="tbl-sessions"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="empty" id="empty-sessions" style="display:none">
+      <div class="ico">🔗</div>No sessions recorded yet…
+    </div>
+  </div>
+
+  <!-- DETECTIONS PANEL -->
+  <div class="panel" id="panel-detections">
+    <div class="tbl-wrap">
+      <div class="tbl-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th data-tooltip="Time the packet was received.">Time</th>
+              <th data-tooltip="Source MAC address of the device transmitting the packet.">MAC</th>
+              <th data-tooltip="Received Signal Strength Indicator (RSSI). Higher is closer.">RSSI</th>
+              <th data-tooltip="Packet subtype, usually Probe Request or Beacon.">Type</th>
+              <th data-tooltip="The specific network name the device is broadcasting or asking for.">SSID</th>
+              <th data-tooltip="Manufacturer associated with the transmitting MAC address.">Vendor</th>
+              <th data-tooltip="Wireless channel the packet was transmitting on.">Ch</th>
+            </tr>
+          </thead>
+          <tbody id="tbl-detections"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="empty" id="empty-detections" style="display:none">
+      <div class="ico">📶</div>No detections yet…
+    </div>
+  </div>
+
+  <div class="footer">Wi-Fi Radar · Lab-only RF Research · Dashboard auto-refreshes every 3 seconds</div>
+
+  <div id="custom-tooltip"></div>
+
+  <script>
+    const $ = s => document.querySelector(s);
+    const $$ = s => document.querySelectorAll(s);
+
+    // --- Tooltips ---
+    const tooltipEl = document.getElementById('custom-tooltip');
+
+    document.addEventListener('mouseover', (e) => {
+      const target = e.target.closest('[data-tooltip]');
+      if (target) {
+        tooltipEl.textContent = target.getAttribute('data-tooltip');
+        tooltipEl.classList.add('visible');
+      }
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (tooltipEl.classList.contains('visible')) {
+        let x = e.clientX + 15;
+        let y = e.clientY + 15;
+
+        const rect = tooltipEl.getBoundingClientRect();
+        if (x + rect.width > window.innerWidth) {
+          x = e.clientX - rect.width - 15;
+        }
+        if (y + rect.height > window.innerHeight) {
+          y = e.clientY - rect.height - 15;
+        }
+
+        tooltipEl.style.left = x + 'px';
+        tooltipEl.style.top = y + 'px';
+      }
+    });
+
+    document.addEventListener('mouseout', (e) => {
+      const target = e.target.closest('[data-tooltip]');
+      if (target) {
+        tooltipEl.classList.remove('visible');
+      }
+    });
+
+    // --- Tabs ---
+    $$('.tab').forEach(t => t.addEventListener('click', () => {
+      $$('.tab').forEach(x => x.classList.remove('active'));
+      $$('.panel').forEach(x => x.classList.remove('active'));
+      t.classList.add('active');
+      $(`#panel-${t.dataset.tab}`).classList.add('active');
+    }));
+
+    // --- Helpers ---
+    function fmtTime(ts) {
+      if (!ts) return '-';
+      if (typeof ts === 'number') {
+        const d = new Date(ts * 1000);
+        return d.toLocaleTimeString() + ' ' + d.toLocaleDateString();
+      }
+      return ts;
+    }
+
+    function fmtDuration(s) {
+      if (!s || s < 0) return '-';
+      const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60);
+      return `${h}h ${m}m ${sec}s`;
+    }
+
+    function fmtUptime(s) {
+      const h = String(Math.floor(s / 3600)).padStart(2, '0');
+      const m = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
+      const sc = String(Math.floor(s % 60)).padStart(2, '0');
+      return `${h}:${m}:${sc}`;
+    }
+
+    function confBadge(score) {
+      const v = parseFloat(score) || 0;
+      let cls = 'conf-low';
+      if (v >= 60) cls = 'conf-high';
+      else if (v >= 30) cls = 'conf-med';
+      return `<span class="conf ${cls}">${v.toFixed(1)}%</span>`;
+    }
+
+    function pills(arr, cls) {
+      if (!arr || !arr.length) return '<span style="color:#6b7f95">—</span>';
+      return arr.slice(0, 6).map(x => `<span class="${cls}">${x}</span>`).join('') +
+        (arr.length > 6 ? `<span style="color:#6b7f95"> +${arr.length - 6}</span>` : '');
+    }
+
+    function shortHash(h) {
+      return h ? h.substring(0, 12) + '…' : '-';
+    }
+
+    // --- Data Fetching ---
+    async function fetchJSON(url) {
+      try {
+        const r = await fetch(url);
+        return await r.json();
+      } catch { return null; }
+    }
+
+    async function refresh() {
+      // Stats
+      const stats = await fetchJSON('/api/stats');
+      if (stats) {
+        $('#s-clusters').textContent = stats.total_clusters;
+        $('#s-macs').textContent = stats.unique_macs;
+        $('#s-ssids').textContent = stats.unique_ssids;
+        $('#s-sessions').textContent = stats.total_sessions;
+        $('#s-hits').textContent = stats.total_hits;
+        $('#s-hiconf').textContent = stats.high_confidence_clusters;
+        $('#uptime').textContent = fmtUptime(stats.uptime_seconds);
+        $('#current-channel').textContent = stats.current_channel || '?';
+      }
+
+      // Clusters
+      const cd = await fetchJSON('/api/clusters');
+      const ct = $('#tbl-clusters');
+      const ce = $('#empty-clusters');
+      if (cd && cd.clusters && cd.clusters.length) {
+        ce.style.display = 'none';
+        ct.parentElement.parentElement.style.display = '';
+        ct.innerHTML = cd.clusters
+          .sort((a, b) => (b.confidence_score || 0) - (a.confidence_score || 0))
+          .map(c => `<tr>
+        <td>${c.cluster_id}</td>
+        <td title="${c.fingerprint_hash}">${shortHash(c.fingerprint_hash)}</td>
+        <td>${confBadge(c.confidence_score)}</td>
+        <td>${c.hit_count}</td>
+        <td>${pills(c.observed_macs, 'mac-pill')}</td>
+        <td>${pills(c.seen_ssids, 'ssid-pill')}</td>
+        <td>${(c.session_ids || []).length}</td>
+        <td>${fmtTime(c.first_seen)}</td>
+        <td>${fmtTime(c.last_seen)}</td>
+      </tr>`).join('');
+      } else {
+        ct.parentElement.parentElement.style.display = 'none';
+        ce.style.display = '';
+      }
+
+      // Sessions
+      const sd = await fetchJSON('/api/sessions');
+      const st = $('#tbl-sessions');
+      const se = $('#empty-sessions');
+      if (sd && sd.sessions && sd.sessions.length) {
+        se.style.display = 'none';
+        st.parentElement.parentElement.style.display = '';
+        st.innerHTML = sd.sessions.map(s => {
+          const dur = (s.end_time && s.start_time) ? s.end_time - s.start_time : 0;
+          return `<tr>
+        <td style="font-family:var(--mono)">${s.session_id}</td>
+        <td>${pills(s.macs, 'mac-pill')}</td>
+        <td>${(s.fingerprints || []).map(f => `<span class="mac-pill" title="${f}">${shortHash(f)}</span>`).join('')}</td>
+        <td>${fmtTime(s.start_time)}</td>
+        <td>${fmtTime(s.end_time)}</td>
+        <td>${fmtDuration(dur)}</td>
+      </tr>`;
+        }).join('');
+      } else {
+        st.parentElement.parentElement.style.display = 'none';
+        se.style.display = '';
+      }
+
+      // Detections
+      const dd = await fetchJSON('/api/detections');
+      const dt = $('#tbl-detections');
+      const de = $('#empty-detections');
+      if (dd && dd.detections && dd.detections.length) {
+        de.style.display = 'none';
+        dt.parentElement.parentElement.style.display = '';
+        dt.innerHTML = dd.detections.slice().reverse().slice(0, 100).map(d => `<tr>
+      <td>${d.timestamp || '-'}</td>
+      <td><span class="mac-pill">${d.mac || '-'}</span></td>
+      <td>${d.rssi || '?'}</td>
+      <td>${d.type || '-'}</td>
+      <td>${d.ssid ? `<span class="ssid-pill">${d.ssid}</span>` : '-'}</td>
+      <td>${d.vendor || '-'}</td>
+      <td>${d.channel || '?'}</td>
+    </tr>`).join('');
+      } else {
+        dt.parentElement.parentElement.style.display = 'none';
+        de.style.display = '';
+      }
+    }
+
+    // Initial + interval
+    refresh();
+    setInterval(refresh, 3000);
+  </script>
+</body>
+
+</html>
