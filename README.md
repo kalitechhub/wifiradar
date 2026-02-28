@@ -1,2 +1,0 @@
-# wifiradar
-test
