@@ -88,6 +88,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         else:
             self._serve_static(path)
 
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        if path == "/api/shutdown":
+            self._api_shutdown()
+        else:
+            self._headers("application/json", 404)
+            self.wfile.write(json.dumps({"error": "Not found"}).encode())
+
     def _serve_static(self, path: str):
         """Serve built React SPA files from wifiradar/static/."""
         # Map / and /dashboard to index.html
@@ -195,6 +204,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "current_channel": active_chan
         })
 
+
+    def _api_shutdown(self):
+        """Gracefully stop the radar — sets the shared shutdown event."""
+        self._json({"status": "shutting_down"})
+        if _shutdown:
+            _shutdown.set()
 
 class _StoppableServer(HTTPServer):
     def __init__(self, *args, shutdown_event=None, **kwargs):

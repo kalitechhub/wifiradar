@@ -11,6 +11,7 @@
     integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
     integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
   <style>
     :root {
@@ -311,18 +312,79 @@
       opacity: 1;
       visibility: visible;
     }
+
+    /* Stop button */
+    #stop-btn {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 18px;
+      background: rgba(255,23,68,.15);
+      color: var(--red);
+      border: 1px solid rgba(255,23,68,.4);
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 700;
+      font-family: var(--sans);
+      cursor: pointer;
+      letter-spacing: .3px;
+      transition: background .2s, border-color .2s, transform .1s;
+    }
+    #stop-btn:hover {
+      background: rgba(255,23,68,.3);
+      border-color: var(--red);
+    }
+    #stop-btn:active { transform: scale(.96); }
+    #stop-btn:disabled {
+      opacity: .5;
+      cursor: not-allowed;
+    }
+
+    /* Shutdown overlay */
+    #shutdown-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,.75);
+      z-index: 10000;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 16px;
+    }
+    #shutdown-overlay.show {
+      display: flex;
+    }
+    #shutdown-overlay .msg {
+      font-size: 22px;
+      font-weight: 700;
+      color: var(--red);
+    }
+    #shutdown-overlay .sub {
+      font-size: 14px;
+      color: var(--text-dim);
+    }
   </style>
 </head>
 
 <body>
 
+  <!-- Shutdown overlay -->
+  <div id="shutdown-overlay">
+    <div class="msg">⛔ Shutting Down…</div>
+    <div class="sub">The radar engine is stopping. The adapter will be restored to managed mode.</div>
+  </div>
+
   <div class="header">
     <h1>📡 Wi-Fi <span>Radar</span> — Live Dashboard</h1>
-    <div class="status" data-tooltip="Real-time capture status and uptime of the radar engine">
-      <div class="dot"></div>
-      <span id="uptime">--:--:--</span>
-      <span>· Channel <span id="current-channel" style="color:var(--accent); font-weight:bold;">?</span></span>
-      <span>· Refreshing every 3s</span>
+    <div style="display:flex; align-items:center; gap:20px;">
+      <div class="status" data-tooltip="Real-time capture status and uptime of the radar engine">
+        <div class="dot"></div>
+        <span id="uptime">--:--:--</span>
+        <span>· Channel <span id="current-channel" style="color:var(--accent); font-weight:bold;">?</span></span>
+        <span>· Refreshing every 3s</span>
+      </div>
+      <button id="stop-btn" data-tooltip="Gracefully stop the radar engine and restore the Wi-Fi adapter" onclick="stopRadar()">⏹ Stop Radar</button>
     </div>
   </div>
 
@@ -362,6 +424,8 @@
     <div class="tab" data-tab="detections" data-tooltip="View the raw stream of intercepted Wi-Fi probes and beacons.">
       Detections</div>
     <div class="tab" data-tab="map" data-tooltip="Interactive Geographic Map of SSIDs">Map</div>
+    <div class="tab" data-tab="foxhunt" data-tooltip="Live RSSI tracking graph for physical device locating">Fox Hunt
+    </div>
   </div>
 
   <!-- CLUSTERS PANEL -->
@@ -445,6 +509,25 @@
     <div id="leaflet-map" style="height: 600px; width: 100%; border-radius: 8px;"></div>
   </div>
 
+  <!-- FOX HUNT PANEL -->
+  <div class="panel" id="panel-foxhunt">
+    <div style="margin-bottom: 1rem; display: flex; align-items: center; gap: 1rem;">
+      <label for="foxhunt-target" style="color: var(--text); font-weight: 500;">Select Target (Cluster):</label>
+      <select id="foxhunt-target"
+        style="padding: 0.5rem; border-radius: 4px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); outline: none; flex-grow: 1; max-width: 400px; font-family: var(--mono);"></select>
+    </div>
+    <div
+      style="background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; text-align: center; margin-bottom: 1rem;">
+      <div id="foxhunt-status"
+        style="font-size: 1.5rem; font-weight: bold; color: var(--text-dim); font-family: var(--sans);">📡 Awaiting
+        Target Data...</div>
+    </div>
+    <div
+      style="background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; text-align: center;">
+      <canvas id="foxhunt-chart" style="width:100%; height:430px; max-height:430px;"></canvas>
+    </div>
+  </div>
+
   <div class="footer">Wi-Fi Radar · Lab-only RF Research · Dashboard auto-refreshes every 3 seconds</div>
 
   <div id="custom-tooltip"></div>
@@ -498,6 +581,9 @@
 
       if (t.dataset.tab === 'map' && map) {
         setTimeout(() => map.invalidateSize(), 50);
+      }
+      if (t.dataset.tab === 'foxhunt' && typeof foxHuntChart !== 'undefined' && foxHuntChart) {
+        setTimeout(() => foxHuntChart.resize(), 50);
       }
     }));
 
@@ -663,11 +749,155 @@
         dt.parentElement.parentElement.style.display = 'none';
         de.style.display = '';
       }
+
+      // Fox Hunt Logic
+      const foxhuntSelect = $('#foxhunt-target');
+      if (cd && cd.clusters && cd.clusters.length) {
+        // Populate dropdown if empty or update it
+        const currentTarget = foxhuntSelect.value;
+        const previousOptions = foxhuntSelect.innerHTML;
+
+        let newOptions = '<option value="">-- Select a Target --</option>';
+        cd.clusters
+          .sort((a, b) => b.hit_count - a.hit_count)
+          .forEach(c => {
+            const ssids = c.seen_ssids.length ? c.seen_ssids.join(', ') : 'Unknown SSID';
+            const macs = c.observed_macs.length ? c.observed_macs.join(', ') : 'Unknown MAC';
+            newOptions += `<option value="${c.cluster_id}">[${c.cluster_id}] ${ssids} / ${macs} (${c.hit_count} hits)</option>`;
+          });
+
+        if (newOptions !== previousOptions) {
+          foxhuntSelect.innerHTML = newOptions;
+          foxhuntSelect.value = currentTarget || ""; // Preserve selection
+        }
+
+        // Update Chart
+        const targetId = parseInt(foxhuntSelect.value);
+        if (targetId) {
+          const targetCluster = cd.clusters.find(c => c.cluster_id === targetId);
+          if (targetCluster && targetCluster.rssi_history) {
+            updateFoxHuntChart(targetCluster.rssi_history);
+          }
+        }
+      }
+    }
+
+    let foxHuntChart;
+    function updateFoxHuntChart(fullRssiHistory) {
+      const MAX_POINTS = 60;
+      const rssiHistory = fullRssiHistory.slice(-MAX_POINTS);
+      const ctx = document.getElementById('foxhunt-chart').getContext('2d');
+      const labels = rssiHistory.map((_, i) => i + 1);
+
+      if (!foxHuntChart) {
+        Chart.defaults.color = '#c8d4e0';
+        Chart.defaults.font.family = "'Inter', sans-serif";
+        foxHuntChart = new Chart(ctx, {
+          type: 'line',
+          data: {
+            labels: [...labels],
+            datasets: [{
+              label: 'Signal Strength (RSSI)',
+              data: [...rssiHistory],
+              borderColor: '#00e5ff',
+              backgroundColor: 'rgba(0, 229, 255, 0.15)',
+              borderWidth: 2,
+              fill: true,
+              tension: 0.3,
+              pointRadius: 0,
+              pointHoverRadius: 5
+            }]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: {
+              duration: 500, // Make it smoother
+              easing: 'linear'
+            },
+            scales: {
+              y: {
+                min: -100,
+                max: -20,
+                title: { display: true, text: 'RSSI (dBm)' },
+                grid: { color: '#1e2a3a' }
+              },
+              x: {
+                display: false, // hide x axis completely for a cleaner osciloscope look
+                grid: { display: false }
+              }
+            },
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                callbacks: {
+                  label: function (context) {
+                    return context.parsed.y + ' dBm';
+                  }
+                }
+              }
+            }
+          }
+        });
+      } else {
+        foxHuntChart.data.labels = [...labels];
+        foxHuntChart.data.datasets[0].data = [...rssiHistory];
+        foxHuntChart.update(); // Update with animation redraw
+      }
+
+      // Trajectory Math: "Hot and Cold" text indicator
+      const statusEl = document.getElementById('foxhunt-status');
+      if (rssiHistory.length > 5) {
+        // Compare the average of the last 3 points vs the 3 points before that
+        const L = rssiHistory.length;
+        const currentGroup = rssiHistory.slice(L - 3, L);
+        const previousGroup = rssiHistory.slice(L - 6, L - 3);
+
+        const currentAvg = currentGroup.reduce((a, b) => a + b, 0) / currentGroup.length;
+        const previousAvg = previousGroup.reduce((a, b) => a + b, 0) / previousGroup.length;
+
+        // Positive gap means signal is getting stronger
+        const delta = currentAvg - previousAvg;
+
+        if (delta > 1.5) {
+          statusEl.innerHTML = '🔥 <span style="color: var(--green);">Getting Closer</span> 🔥';
+        } else if (delta < -1.5) {
+          statusEl.innerHTML = '❄️ <span style="color: var(--text-dim);">Walking Away</span> ❄️';
+        } else {
+          statusEl.innerHTML = '🟡 <span style="color: var(--amber);">Stationary / Unsure</span> 🟡';
+        }
+      } else {
+        statusEl.innerHTML = '📡 Collecting Baseline Data...';
+      }
+    }
+
+    // --- Stop Radar ---
+    async function stopRadar() {
+      const btn = document.getElementById('stop-btn');
+      if (!confirm('Stop the radar engine and restore the Wi-Fi adapter to managed mode?')) return;
+      btn.disabled = true;
+      btn.textContent = '⏳ Stopping…';
+      try {
+        const res = await fetch('/api/shutdown', { method: 'POST' });
+        if (res.ok) {
+          document.getElementById('shutdown-overlay').classList.add('show');
+          // Stop the refresh polling
+          clearInterval(refreshInterval);
+        } else {
+          alert('Shutdown request failed. Try: sudo python3 wifi_radar.py stop');
+          btn.disabled = false;
+          btn.textContent = '⏹ Stop Radar';
+        }
+      } catch (e) {
+        // Server likely already went down — still show overlay
+        document.getElementById('shutdown-overlay').classList.add('show');
+        clearInterval(refreshInterval);
+      }
     }
 
     // Initial + interval
     refresh();
-    setInterval(refresh, 3000);
+    const refreshInterval = setInterval(refresh, 3000);
   </script>
 </body>
 

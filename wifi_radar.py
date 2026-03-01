@@ -33,41 +33,74 @@ except ImportError:
     sys.exit(1)
 
 # ---------- SETTINGS ----------
-ALFA_IFACE_DEFAULT = "wlx00c0cab4b4f0"   # monitor adapter (Alfa)
-ONBOARD_IFACE      = "wlp2s0"            # your normal internet adapter (left alone)
+ALFA_IFACE_DEFAULT = "wlx00c0cab4b4f0"   # primary Alfa adapter (hardcoded, tried first)
+
+def _iface_exists(name):
+    """Return True if the named network interface is visible to the OS."""
+    return subprocess.run(f"ip link show {name}", shell=True,
+                          capture_output=True, text=True).returncode == 0
+
+def _is_usb_wifi(iface):
+    """
+    Return True if 'iface' is a USB wireless adapter.
+    Checks the sysfs device symlink — USB adapters always resolve through
+    a '/usb' component in their path, while PCI/onboard cards do not.
+    Works on any Linux machine regardless of interface naming.
+    """
+    try:
+        dev_path = Path(f"/sys/class/net/{iface}/device").resolve()
+        return "/usb" in str(dev_path)
+    except Exception:
+        return False
 
 def _detect_alfa():
-    """Try the hardcoded name first; fall back to auto-detecting an Alfa USB adapter."""
-    # 1) Try the known name
-    check = subprocess.run(f"ip link show {ALFA_IFACE_DEFAULT}", shell=True,
-                           capture_output=True, text=True)
-    if check.returncode == 0:
+    """
+    Select the monitor adapter, always skipping onboard/PCI adapters.
+
+    Onboard detection is bus-type based (sysfs), so it works on any machine
+    regardless of whether the onboard is wlp2s0, wlan0, wlp3s0, etc.
+
+    Priority:
+      1. wlx00c0cab4b4f0  – the hardcoded Alfa (tried first)
+      2. Auto-detect      – any USB wireless adapter that is not the
+                            hardcoded Alfa (local Alfa fallback)
+    """
+    # 1) Try the hardcoded Alfa name first
+    if _iface_exists(ALFA_IFACE_DEFAULT):
+        print(f"[detect] Using primary Alfa adapter: '{ALFA_IFACE_DEFAULT}'")
         return ALFA_IFACE_DEFAULT
 
-    # 2) Auto-detect: look for a wireless interface that isn't the onboard one
-    print(f"[detect] '{ALFA_IFACE_DEFAULT}' not found, scanning for USB Wi-Fi adapter…")
+    # 2) Auto-detect — any USB wireless iface (onboard/PCI adapters are skipped)
+    print(f"[detect] '{ALFA_IFACE_DEFAULT}' not found, scanning for any USB Wi-Fi adapter…")
     try:
         out = subprocess.run("iw dev", shell=True, capture_output=True, text=True).stdout
-        ifaces = []
+        usb_ifaces = []
         for line in out.splitlines():
             line = line.strip()
             if line.startswith("Interface "):
                 iface = line.split()[1]
-                if iface != ONBOARD_IFACE:
-                    ifaces.append(iface)
-        if ifaces:
-            print(f"[detect] found candidate(s): {ifaces} — using '{ifaces[0]}'")
-            return ifaces[0]
+                if iface == ALFA_IFACE_DEFAULT:
+                    continue  # already tried above
+                if _is_usb_wifi(iface):
+                    usb_ifaces.append(iface)
+                else:
+                    print(f"[detect] Skipping '{iface}' (onboard/PCI adapter)")
+        if usb_ifaces:
+            print(f"[detect] Found USB adapter(s): {usb_ifaces} — using '{usb_ifaces[0]}' as fallback")
+            return usb_ifaces[0]
     except Exception as e:
         print(f"[detect] auto-detect error: {e}")
 
     # 3) Nothing found
-    print("[detect] ERROR: No suitable Wi-Fi adapter found.")
+    print("[detect] ERROR: No suitable USB Wi-Fi adapter found.")
     print("         Plug in your Alfa adapter and try again.")
     print(f"         Expected: {ALFA_IFACE_DEFAULT}")
     sys.exit(1)
 
 ALFA_IFACE = _detect_alfa()
+# Keep a reference so stop_flow() can restore the correct interface name
+ONBOARD_IFACE = "wlp2s0"   # informational only — actual exclusion is bus-type based
+
 
 def ensure_dependencies():
     """Checks for required system/pip packages and installs them if missing."""
@@ -265,17 +298,25 @@ def start_pcap(iface, path):
 # ---------- CHANNEL HOPPER ----------
 # Export current channel for the dashboard
 _current_channel = "?"
+_auto_lock_channel = None
 
 def get_current_channel():
     return _current_channel
 
 def channel_hopper(iface):
     """Cycle through 2.4GHz + 5GHz Wi-Fi channels until shutdown is signalled."""
-    global _current_channel
+    global _current_channel, _auto_lock_channel
     try:
         idx = 0
         fail_count = {}
         while not _shutdown.is_set():
+            if _auto_lock_channel:
+                ch = _auto_lock_channel
+                run(f"iw dev {iface} set channel {ch}", check=False, capture=True, quiet=True)
+                _current_channel = str(ch)
+                _shutdown.wait(1.0)
+                continue
+
             ch = HOP_CHANNELS[idx % len(HOP_CHANNELS)]
             result = run(f"iw dev {iface} set channel {ch}", check=False, capture=True, quiet=True)
             if result.returncode != 0:
@@ -385,8 +426,6 @@ def start_detector(iface, target_mac, ssid_filter, csv_path, json_path,
             macs = [pkt.addr1, pkt.addr2, pkt.addr3]
             if not any(m and m.lower()==target for m in macs): return False
         if ssidflt:
-            if pkt.subtype != 4:
-                return False
             if get_ssid(pkt).strip().lower() != ssidflt.lower():
                 return False
         return True
@@ -398,16 +437,22 @@ def start_detector(iface, target_mac, ssid_filter, csv_path, json_path,
             log.error(f"Packet handler error:\n{traceback.format_exc()}")
 
     def _handle_inner(pkt):
+        global _auto_lock_channel
         if _shutdown.is_set(): return
         if not want(pkt): return
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         subtype = (pkt.type, pkt.subtype)
         kind = CLIENT_OK[subtype]
-        ssid = get_ssid(pkt) if pkt.subtype==4 else ""
+        ssid = get_ssid(pkt)
         mac  = (pkt.addr2 or pkt.addr1 or pkt.addr3 or "").lower()
         sig = rssi(pkt)
         sig_str = str(sig) if sig is not None else "?"
         chan = freq_to_chan(get_channel(pkt))
+
+        # Auto-lock onto channel if this is a targeted Fox Hunt
+        if ssidflt and not _auto_lock_channel and isinstance(chan, int):
+            _auto_lock_channel = chan
+            print(f"\n[foxhunt] Target '{ssid}' intercepted! Auto-locking hopper to channel {chan}!")
 
         # probe counters
         if subtype == (0,4):
@@ -520,7 +565,7 @@ def _signal_handler(signum, frame):
     print(f"\n[signal] Received signal {signum}, shutting down…")
     _shutdown.set()
 
-def start_flow():
+def start_flow(target_channel=None):
     print("=== Wi-Fi Radar START ===")
     ensure_dirs()
 
@@ -565,16 +610,22 @@ def start_flow():
     pcap_proc = start_pcap(ALFA_IFACE, PCAP_PATH)
 
     target_mac = ""
-    ssid_filter= input("Filter ProbeReq by SSID (blank=ANY): ").strip()
+    ssid_filter= input("Filter by Target SSID (blank=ANY): ").strip()
 
     # --- Initialize fingerprinting / clustering / session engines ---
     clust_engine = DeviceClusterEngine()
     sess_engine  = SessionEngine()
     print("[engines] Fingerprint + Cluster + Session engines initialized.")
 
-    # Start channel hopper thread
-    hop_thr = threading.Thread(target=channel_hopper, args=(ALFA_IFACE,), daemon=True)
-    hop_thr.start()
+    # Start channel hopper thread OR lock channel
+    global _current_channel
+    if target_channel:
+        print(f"[hop] Locking adapter to channel: {target_channel} (Targeted Fox Hunt)")
+        run(f"iw dev {ALFA_IFACE} set channel {target_channel}", check=False)
+        _current_channel = str(target_channel)
+    else:
+        hop_thr = threading.Thread(target=channel_hopper, args=(ALFA_IFACE,), daemon=True)
+        hop_thr.start()
 
     # Start detector thread
     det_thr = threading.Thread(target=start_detector,
@@ -592,7 +643,10 @@ def start_flow():
     print("\n[RUNNING]")
     print(f"  Monitor iface : {ALFA_IFACE} (monitor mode)")
     print(f"  Onboard iface : {ONBOARD_IFACE} (left alone; keep your internet)")
-    print(f"  Channel hop   : ch {HOP_CHANNELS[0]}–{HOP_CHANNELS[-1]} ({len(HOP_CHANNELS_24)} x 2.4GHz + {len(HOP_CHANNELS_5)} x 5GHz) every {HOP_INTERVAL}s")
+    if target_channel:
+        print(f"  Target Channel: {target_channel} (LOCKED)")
+    else:
+        print(f"  Channel hop   : ch {HOP_CHANNELS[0]}–{HOP_CHANNELS[-1]} ({len(HOP_CHANNELS_24)} x 2.4GHz + {len(HOP_CHANNELS_5)} x 5GHz) every {HOP_INTERVAL}s")
     print(f"  PCAP          : {PCAP_PATH}")
     print(f"  CSV           : {CSV_PATH}")
     print(f"  JSON          : {JSON_PATH}")
@@ -677,12 +731,22 @@ def main():
     require_root()
     ensure_dirs()
     if len(sys.argv) < 2:
-        print(f"Usage:\n  sudo python3 {Path(__file__).name} start\n  sudo python3 {Path(__file__).name} stop")
+        print(f"Usage:\n  sudo python3 {Path(__file__).name} start [--channel <num>]\n  sudo python3 {Path(__file__).name} stop")
         return
     cmd = sys.argv[1].lower()
+    
+    target_channel = None
+    if "--channel" in sys.argv:
+        try:
+            idx = sys.argv.index("--channel")
+            target_channel = int(sys.argv[idx + 1])
+        except (ValueError, IndexError):
+            print("ERROR: --channel requires a valid integer channel number.")
+            return
+
     try:
         if cmd == "start":
-            start_flow()
+            start_flow(target_channel=target_channel)
         elif cmd == "stop":
             stop_flow()
         else:
