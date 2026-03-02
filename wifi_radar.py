@@ -153,7 +153,7 @@ ensure_dependencies()
 
 
 
-LOG_DIR        = Path.home() / "radar_logs"
+LOG_DIR        = Path(__file__).parent / "radar_logs"
 _ts            = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 PCAP_PATH      = LOG_DIR / f"capture_{_ts}.pcap"
 CSV_PATH       = LOG_DIR / f"detections_{_ts}.csv"
