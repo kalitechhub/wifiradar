@@ -153,14 +153,21 @@ ensure_dependencies()
 
 
 
-LOG_DIR        = Path(__file__).parent / "radar_logs"
+# ---------- OUTPUT DIRECTORIES (all rooted beside wifi_radar.py) ----------
+_ROOT          = Path(__file__).parent
 _ts            = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-PCAP_PATH      = LOG_DIR / f"capture_{_ts}.pcap"
-CSV_PATH       = LOG_DIR / f"detections_{_ts}.csv"
-JSON_PATH      = LOG_DIR / f"detections_{_ts}.json"
-CLUSTER_JSON   = LOG_DIR / "radar_clusters.json"
-ERROR_LOG_PATH = LOG_DIR / f"errors_{_ts}.log"
-STATE_PATH     = LOG_DIR / "single_state.pid"
+
+LOG_DIR        = _ROOT / "logs"          # system / sniff / error logs
+PCAP_DIR       = _ROOT / "pcaps"         # packet capture files
+DETECTION_DIR  = _ROOT / "detections"    # CSV + JSONL detection records
+CLUSTER_DIR    = _ROOT / "clusters"      # cluster snapshots
+
+PCAP_PATH      = PCAP_DIR      / f"capture_{_ts}.pcap"
+CSV_PATH       = DETECTION_DIR / f"detections_{_ts}.csv"
+JSON_PATH      = DETECTION_DIR / f"detections_{_ts}.json"
+CLUSTER_JSON   = CLUSTER_DIR   / "radar_clusters.json"
+ERROR_LOG_PATH = LOG_DIR       / f"errors_{_ts}.log"
+STATE_PATH     = _ROOT         / "radar.pid"
 
 CLUSTER_DUMP_INTERVAL = 10  # seconds
 
@@ -176,15 +183,14 @@ HOP_INTERVAL    = 0.25                 # seconds per channel
 
 # ---------- DIRECTORY SETUP ----------
 def ensure_dirs():
-    """Ensure the log directory exists and is writable."""
-    try:
-        if not LOG_DIR.exists():
-            LOG_DIR.mkdir(parents=True, exist_ok=True)
-            # If we're root, make sure the directory is accessible
+    """Create all output directories next to the script."""
+    for d in (LOG_DIR, PCAP_DIR, DETECTION_DIR, CLUSTER_DIR):
+        try:
+            d.mkdir(parents=True, exist_ok=True)
             if os.geteuid() == 0:
-                os.chmod(LOG_DIR, 0o777)
-    except Exception as e:
-        print(f"Error creating log directory {LOG_DIR}: {e}")
+                os.chmod(d, 0o777)
+        except Exception as e:
+            print(f"Error creating directory {d}: {e}")
 
 # ---------- LOGGING ----------
 def setup_logger(name, log_file, level=logging.INFO):
@@ -762,10 +768,10 @@ def stop_flow(snapshot=None, pcap_proc=None):
     if run("which nmcli", check=False).returncode == 0:
         run(f"nmcli device set {ALFA_IFACE} managed yes", check=False)
 
-    print(f"[stop] PCAP at: {PCAP_PATH}")
-    print(f"[stop] CSV  at: {CSV_PATH}")
-    print(f"[stop] JSON at: {JSON_PATH}")
-    print(f"[stop] Errors : {ERROR_LOG_PATH}")
+    print(f"[stop] PCAPs      : {PCAP_DIR}")
+    print(f"[stop] Detections : {DETECTION_DIR}")
+    print(f"[stop] Clusters   : {CLUSTER_DIR}")
+    print(f"[stop] Logs       : {LOG_DIR}")
     print("[stop] done.")
 
 def main():
