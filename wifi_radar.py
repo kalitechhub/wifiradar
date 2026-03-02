@@ -104,32 +104,53 @@ ONBOARD_IFACE = "wlp2s0"   # informational only — actual exclusion is bus-type
 
 def ensure_dependencies():
     """
-    Offline-safe dependency check.
-    Only warns about missing packages — never tries to install or reach the internet.
-    Pre-install everything before use:
-      sudo apt install tcpdump ieee-data
-      pip install scapy flask requests
+    Checks for required packages.
+    - If online: auto-installs anything missing.
+    - If offline: warns and continues — never hangs waiting for the network.
     """
+    def _is_online():
+        return subprocess.run(
+            "ping -c1 -W1 8.8.8.8", shell=True, capture_output=True
+        ).returncode == 0
+
+    online = None   # lazy — only checked if something is missing
+
+    # --- System packages ---
     missing_sys = []
     if subprocess.run("which tcpdump", shell=True, capture_output=True).returncode != 0:
         missing_sys.append("tcpdump")
     if not Path("/var/lib/ieee-data/oui.txt").exists():
         missing_sys.append("ieee-data")
-    if missing_sys:
-        print(f"[install] WARNING: Missing system packages: {missing_sys}")
-        print( "[install]          Install with: sudo apt install " + " ".join(missing_sys))
 
+    if missing_sys:
+        online = _is_online()
+        if online:
+            print(f"[install] Missing system packages: {missing_sys} — installing…")
+            subprocess.run(f"apt-get update && apt-get install -y {' '.join(missing_sys)}", shell=True)
+        else:
+            print(f"[install] WARNING: offline — cannot install missing packages: {missing_sys}")
+            print( "[install]          Once online, run: sudo apt install " + " ".join(missing_sys))
+
+    # --- Python packages ---
     missing_pip = []
     for pkg in ("scapy", "flask", "requests"):
         try:
             __import__(pkg)
         except ImportError:
             missing_pip.append(pkg)
+
     if missing_pip:
-        print(f"[install] WARNING: Missing Python packages: {missing_pip}")
-        print( "[install]          Install with: pip install " + " ".join(missing_pip))
+        if online is None:
+            online = _is_online()
+        if online:
+            print(f"[install] Missing Python packages: {missing_pip} — installing…")
+            subprocess.run([sys.executable, "-m", "pip", "install", *missing_pip, "--break-system-packages"])
+        else:
+            print(f"[install] WARNING: offline — cannot install missing packages: {missing_pip}")
+            print( "[install]          Once online, run: pip install " + " ".join(missing_pip))
 
 ensure_dependencies()
+
 
 
 LOG_DIR        = Path.home() / "radar_logs"
