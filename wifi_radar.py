@@ -103,47 +103,34 @@ ONBOARD_IFACE = "wlp2s0"   # informational only — actual exclusion is bus-type
 
 
 def ensure_dependencies():
-    """Checks for required system/pip packages and installs them if missing."""
-    import subprocess
-    import sys
-    print("[install] Checking system dependencies...")
-    sys_missing = []
+    """
+    Offline-safe dependency check.
+    Only warns about missing packages — never tries to install or reach the internet.
+    Pre-install everything before use:
+      sudo apt install tcpdump ieee-data
+      pip install scapy flask requests
+    """
+    missing_sys = []
     if subprocess.run("which tcpdump", shell=True, capture_output=True).returncode != 0:
-        sys_missing.append("tcpdump")
-
+        missing_sys.append("tcpdump")
     if not Path("/var/lib/ieee-data/oui.txt").exists():
-        sys_missing.append("ieee-data")
+        missing_sys.append("ieee-data")
+    if missing_sys:
+        print(f"[install] WARNING: Missing system packages: {missing_sys}")
+        print( "[install]          Install with: sudo apt install " + " ".join(missing_sys))
 
-    if sys_missing:
-        # Check internet connectivity before trying apt-get update
-        online = subprocess.run(
-            "ping -c1 -W2 8.8.8.8", shell=True, capture_output=True
-        ).returncode == 0
-        if online:
-            print(f"[install] Missing system packages: {sys_missing}. Installing now...")
-            subprocess.run(f"apt-get update && apt-get install -y {' '.join(sys_missing)}", shell=True)
-        else:
-            print(f"[install] WARNING: No internet — cannot install missing packages: {sys_missing}")
-            print("[install] Continuing anyway; some features may not work.")
-
-    pip_missing = []
-    try:
-        import scapy
-    except ImportError: pip_missing.append("scapy")
-
-    try:
-        import flask
-    except ImportError: pip_missing.append("flask")
-
-    try:
-        import requests
-    except ImportError: pip_missing.append("requests")
-
-    if pip_missing:
-        print(f"[install] Missing python packages: {pip_missing}. Installing now...")
-        subprocess.run([sys.executable, "-m", "pip", "install", *pip_missing, "--break-system-packages"])
+    missing_pip = []
+    for pkg in ("scapy", "flask", "requests"):
+        try:
+            __import__(pkg)
+        except ImportError:
+            missing_pip.append(pkg)
+    if missing_pip:
+        print(f"[install] WARNING: Missing Python packages: {missing_pip}")
+        print( "[install]          Install with: pip install " + " ".join(missing_pip))
 
 ensure_dependencies()
+
 
 LOG_DIR        = Path.home() / "radar_logs"
 _ts            = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
