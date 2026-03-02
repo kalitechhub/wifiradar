@@ -110,23 +110,31 @@ def ensure_dependencies():
     sys_missing = []
     if subprocess.run("which tcpdump", shell=True, capture_output=True).returncode != 0:
         sys_missing.append("tcpdump")
-    
+
     if not Path("/var/lib/ieee-data/oui.txt").exists():
         sys_missing.append("ieee-data")
 
     if sys_missing:
-        print(f"[install] Missing system packages: {sys_missing}. Installing now...")
-        subprocess.run(f"apt-get update && apt-get install -y {' '.join(sys_missing)}", shell=True)
-    
+        # Check internet connectivity before trying apt-get update
+        online = subprocess.run(
+            "ping -c1 -W2 8.8.8.8", shell=True, capture_output=True
+        ).returncode == 0
+        if online:
+            print(f"[install] Missing system packages: {sys_missing}. Installing now...")
+            subprocess.run(f"apt-get update && apt-get install -y {' '.join(sys_missing)}", shell=True)
+        else:
+            print(f"[install] WARNING: No internet — cannot install missing packages: {sys_missing}")
+            print("[install] Continuing anyway; some features may not work.")
+
     pip_missing = []
     try:
         import scapy
     except ImportError: pip_missing.append("scapy")
-    
+
     try:
         import flask
     except ImportError: pip_missing.append("flask")
-    
+
     try:
         import requests
     except ImportError: pip_missing.append("requests")
@@ -538,22 +546,47 @@ def start_detector(iface, target_mac, ssid_filter, csv_path, json_path,
         # Note: HUD queue logic was removed as the web dashboard reads from files/engines directly.
 
     # BPF filter: only management frames (type 0)
-    # "type mgt" isn't supported on all systems, so fall back to no filter
-    try:
-        sniff(iface=iface, prn=handle, store=False,
-              filter="wlan type mgt",
-              stop_filter=lambda _: _shutdown.is_set())
-    except Scapy_Exception:
-        # BPF compile failed – retry without filter (handler already
-        # checks for Dot11 management frames, so this is safe)
-        print("[sniff] BPF 'type mgt' not supported, restarting without BPF filter…")
+    # "type mgt" isn't supported on all systems, so fall back to no filter.
+    # OSError errno 100 (ENETDOWN) can occur when the adapter is transitioning
+    # into monitor mode while offline — we retry with a short back-off.
+    import errno as _errno
+    MAX_RETRIES = 5
+    for attempt in range(MAX_RETRIES):
+        if _shutdown.is_set():
+            break
         try:
             sniff(iface=iface, prn=handle, store=False,
+                  filter="wlan type mgt",
                   stop_filter=lambda _: _shutdown.is_set())
+            break  # clean exit
+        except Scapy_Exception:
+            # BPF compile failed – retry without filter (handler already
+            # checks for Dot11 management frames, so this is safe)
+            print("[sniff] BPF 'type mgt' not supported, restarting without BPF filter…")
+            try:
+                sniff(iface=iface, prn=handle, store=False,
+                      stop_filter=lambda _: _shutdown.is_set())
+                break  # clean exit
+            except OSError as e:
+                if e.errno == _errno.ENETDOWN:
+                    print(f"[sniff] Network down (errno 100), retrying in 2 s… (attempt {attempt+1}/{MAX_RETRIES})")
+                    _shutdown.wait(2)
+                else:
+                    log.error(f"Detector sniff crashed:\n{traceback.format_exc()}")
+                    break
+            except Exception:
+                log.error(f"Detector sniff crashed:\n{traceback.format_exc()}")
+                break
+        except OSError as e:
+            if e.errno == _errno.ENETDOWN:
+                print(f"[sniff] Network down (errno 100), retrying in 2 s… (attempt {attempt+1}/{MAX_RETRIES})")
+                _shutdown.wait(2)
+            else:
+                log.error(f"Detector sniff crashed:\n{traceback.format_exc()}")
+                break
         except Exception:
             log.error(f"Detector sniff crashed:\n{traceback.format_exc()}")
-    except Exception:
-        log.error(f"Detector sniff crashed:\n{traceback.format_exc()}")
+            break
     print("[detector] stopped.")
 
 # ---------- HUD ----------

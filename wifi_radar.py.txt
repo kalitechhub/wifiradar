@@ -1,0 +1,476 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+wifi_radar.py  —  Single-radio client-only Wi-Fi radar with HDMI HUD
+
+• Uses Alfa (monitor mode) to sniff client-ish mgmt frames only
+  (ProbeReq, AssocReq, ReassocReq, Auth, Disassoc, Deauth)
+• Leaves onboard Wi-Fi alone for your internet
+• PCAP + (optional targeted CSV) logging
+• HUD formatted to fit small HDMI screens (fixed-width columns)
+
+Run:
+  sudo python3 wifi_radar.py start        # with HUD
+  sudo python3 wifi_radar.py start --nohud
+  sudo python3 wifi_radar.py stop
+"""
+
+import os, sys, time, csv, signal, subprocess, threading, queue, getpass, sqlite3
+from pathlib import Path
+
+# ---------- SETTINGS ----------
+ALFA_IFACE     = "wlx00c0cab4b4f0"   # monitor adapter (Alfa)
+ONBOARD_IFACE  = "wlp2s0"            # your normal internet adapter (left alone)
+
+LOG_DIR        = Path.home() / "radar_logs"
+PCAP_PATH      = LOG_DIR / f"single_capture_{int(time.time())}.pcap"
+CSV_PATH       = LOG_DIR / "detections.csv"
+STATE_PATH     = LOG_DIR / "single_state.pid"
+
+# Location of your oui.db (Wireshark style SQLite DB)
+OUI_DB         = Path("/usr/share/wireshark/wireshark/manuf.db")
+# Fallback: some distros place it here:
+if not OUI_DB.exists():
+    alt = Path("/usr/share/wireshark/manuf.db")
+    if alt.exists(): OUI_DB = alt
+
+SHOW_HUD_DEFAULT = True
+
+# HUD layout (aim ~86–92 columns for a 7–10” HDMI)
+HUD_COLS      = 90
+FONT_HEADER   = 16
+FONT_BODY     = 12
+
+# ---------- SHELL HELPERS ----------
+def run(cmd, check=True, capture=False):
+    print(f"[cmd] {cmd}")
+    if capture:
+        return subprocess.run(cmd, shell=True, check=check,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    return subprocess.run(cmd, shell=True, check=check)
+
+def require_root():
+    if getpass.getuser() != "root":
+        print("ERROR: run as root (sudo).")
+        sys.exit(1)
+
+def ensure_dirs():
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+def iface_info(iface):
+    typ = None; st = None
+    out = run(f"iw dev {iface} info", check=False, capture=True).stdout
+    for ln in out.splitlines():
+        ln = ln.strip()
+        if ln.startswith("type"):
+            typ = ln.split()[-1]; break
+    out2 = run(f"ip link show {iface}", check=False, capture=True).stdout
+    if "<" in out2 and ">" in out2:
+        flags = out2.split("<",1)[1].split(">",1)[0]
+        st = "UP" if "UP" in flags.split(",") else "DOWN"
+    return {"type": typ or "unknown", "state": st or "DOWN"}
+
+def set_type(iface, newtype):
+    run(f"ip link set {iface} down", check=False)
+    run(f"iw dev {iface} set type {newtype}", check=False)
+    run(f"ip link set {iface} up", check=False)
+
+def set_updown(iface, up=True):
+    run(f"ip link set {iface} {'up' if up else 'down'}", check=False)
+
+# ---------- OUI / Vendor (Wireshark text manuf) ----------
+MANUF_FILE = Path("/usr/share/wireshark/manuf")
+
+class OuiLookup:
+    """
+    Parses /usr/share/wireshark/manuf (text). Supports 3–6 byte prefixes.
+    Keeps a longest-prefix map so we prefer 6-byte over 3-byte hits.
+    """
+    def __init__(self, manuf_path: Path):
+        self.path = Path(manuf_path)
+        self.map = {}   # key: cleaned hex prefix like 'a1:b2:c3' or 'a1:b2:c3:d4:e5:f6' -> vendor
+        if self.path.exists():
+            try:
+                self._load()
+            except Exception as e:
+                print(f"[oui] warn: {e}")
+
+    @staticmethod
+    def _clean_hex(s: str) -> str:
+        s = s.strip().lower().replace('-',':').replace('.',':')
+        # collapse multiple separators and pad hex pairs
+        parts = [p for p in s.split(':') if p]
+        return ':'.join(parts)
+
+    def _load(self):
+        with self.path.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                # Format: 00:00:0C  Cisco  # comment
+                # or     00:50:C2:xx:xx:xx  IEEE Registration Authority
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                prefix = self._clean_hex(parts[0])
+                vendor = ' '.join(p for p in parts[1:] if not p.startswith('#')).strip()
+                # Only accept prefixes that look like hex pairs
+                hex_ok = all(all(c in '0123456789abcdef' for c in seg) and len(seg)==2
+                              for seg in prefix.split(':'))
+                if not hex_ok:
+                    continue
+                self.map[prefix] = vendor
+
+        # Build search list ordered by longest prefix first
+        self._keys_by_len = sorted(self.map.keys(), key=lambda k: -len(k))
+
+    def vendor(self, mac: str) -> str:
+        if not self.map or not mac:
+            return "[Unknown]"
+        m = self._clean_hex(mac)
+        # try longest-to-shortest prefix match
+        # (6-byte, 5-byte, 4-byte, 3-byte)
+        parts = m.split(':')
+        # normalize to at least 6 pairs for slicing safety
+        while len(parts) < 6:
+            parts.append('00')
+        candidates = [
+            ':'.join(parts[:6]),
+            ':'.join(parts[:5]),
+            ':'.join(parts[:4]),
+            ':'.join(parts[:3]),
+        ]
+        for c in candidates:
+            if c in self.map:
+                return self.map[c]
+        return "[Unknown]"
+
+OUI = OuiLookup(MANUF_FILE)
+
+# ---------- CAPTURE ----------
+def start_pcap(iface, path):
+    return subprocess.Popen(["tcpdump", "-i", iface, "-w", str(path)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+# ---------- DETECTOR ----------
+def start_detector(iface, target_mac, ssid_filter, csv_path, hud_bus):
+    """Clients-only mgmt frames -> stats for HUD."""
+    from scapy.all import sniff, Dot11
+    import datetime
+
+    CLIENT_OK = {
+        (0,0):"AssocReq",
+        (0,2):"ReassocReq",
+        (0,4):"ProbeReq",
+        (0,10):"Disassoc",
+        (0,11):"Auth",
+        (0,12):"Deauth",
+    }
+
+    target  = (target_mac or "").lower().strip()
+    ssidflt = (ssid_filter or "").strip()
+
+    if not os.path.exists(csv_path):
+        with open(csv_path, "w", newline="") as f:
+            csv.writer(f).writerow(["timestamp","mac","rssi","type","ssid","vendor"])
+
+    counts = {
+        "total":0, "by_type":{}, "by_ssid":{}, "by_mac":{},
+        "probes_directed":0, "probes_broadcast":0,
+        "closest": {"mac":"", "rssi":-999, "ssid":"", "vendor":"[Unknown]"}
+    }
+    last_hits = []
+
+    def rssi(pkt): return getattr(pkt, 'dBm_AntSignal', '')
+    def get_ssid(pkt):
+        if hasattr(pkt, "info"):
+            try: return pkt.info.decode(errors="ignore")
+            except: return ""
+        return ""
+
+    def want(pkt):
+        if not pkt.haslayer(Dot11): return False
+        key = (pkt.type, pkt.subtype)
+        if key not in CLIENT_OK: return False
+        if target:
+            macs = [pkt.addr1, pkt.addr2, pkt.addr3]
+            if not any(m and m.lower()==target for m in macs): return False
+        if ssidflt and pkt.subtype == 4:
+            if get_ssid(pkt).strip() != ssidflt: return False
+        return True
+
+    def handle(pkt):
+        if not want(pkt): return
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        subtype = (pkt.type, pkt.subtype)
+        kind = CLIENT_OK[subtype]
+        ssid = get_ssid(pkt) if pkt.subtype==4 else ""
+        mac  = (pkt.addr2 or pkt.addr1 or pkt.addr3 or "").lower()
+        signal = rssi(pkt)
+
+        # probe counters
+        if subtype == (0,4):  # ProbeReq
+            if ssid: counts["probes_directed"] += 1
+            else:    counts["probes_broadcast"] += 1
+
+        # stats
+        counts["total"] += 1
+        counts["by_type"][kind] = counts["by_type"].get(kind,0)+1
+        if ssid:
+            counts["by_ssid"][ssid] = counts["by_ssid"].get(ssid,0)+1
+
+        if mac:
+            m = counts["by_mac"].get(mac, {"hits":0})
+            m["hits"] += 1
+            if ssid: m["last_ssid"] = ssid
+            m["last_rssi"] = signal
+            if "vendor" not in m:
+                m["vendor"] = OUI.vendor(mac)
+            counts["by_mac"][mac] = m
+
+            # closest tracker
+            try:
+                sig_i = int(signal)
+            except Exception:
+                sig_i = -999
+            if sig_i > counts["closest"]["rssi"]:
+                counts["closest"] = {
+                    "mac": mac, "rssi": sig_i,
+                    "ssid": ssid or "-",
+                    "vendor": m.get("vendor","[Unknown]")
+                }
+
+        # ring last 12 lines
+        last_hits.append((ts, signal, kind, ssid or "-", mac, counts["by_mac"].get(mac,{}).get("vendor","[Unknown]")))
+        if len(last_hits) > 12: del last_hits[0]
+
+        # targeted CSV only
+        if target:
+            with open(csv_path, "a", newline="") as f:
+                csv.writer(f).writerow([ts, mac, signal, kind, ssid, counts["by_mac"][mac].get("vendor","[Unknown]")])
+
+        # push to HUD
+        try:
+            hud_bus.put_nowait(("stats", counts, list(last_hits)))
+        except queue.Full:
+            pass
+
+    sniff(iface=iface, prn=handle, store=False)
+
+# ---------- HUD ----------
+class HUD:
+    def __init__(self, bus):
+        import tkinter as tk
+        from tkinter import font as tkfont
+        self.tk = tk
+        self.bus = bus
+        self.root = tk.Tk()
+        self.root.title("Wi-Fi Radar HUD")
+        self.root.configure(bg="black")
+        self.root.attributes("-fullscreen", True)
+
+        # pick monospace that exists
+        families = set(tkfont.families())
+        def font_tuple(size, weight="normal"):
+            for name in ("JetBrains Mono","DejaVu Sans Mono","Liberation Mono","Ubuntu Mono","Monospace","TkFixedFont"):
+                if name in families:
+                    return (name, size, weight)
+            return ("TkFixedFont", size, weight)
+
+        def mklabel(fsize=FONT_BODY, weight="normal", fg="#CDE6F5"):
+            return tk.Label(self.root, font=font_tuple(fsize, weight), fg=fg, bg="black",
+                            justify="left", anchor="w", width=HUD_COLS)
+
+        self.title   = mklabel(FONT_HEADER, "bold", "#8BE9FD")
+        self.title.pack(anchor="w", padx=16, pady=(12,4))
+
+        self.closest = mklabel(FONT_BODY, "bold", "#A0FF9B")
+        self.closest.pack(anchor="w", padx=16, pady=(0,6))
+
+        self.counters= mklabel()
+        self.counters.pack(anchor="w", padx=16, pady=(0,6))
+
+        self.block1  = mklabel()
+        self.block1.pack(anchor="w", padx=16)
+        self.block2  = mklabel()
+        self.block2.pack(anchor="w", padx=16, pady=(6,0))
+        self.block3  = mklabel()
+        self.block3.pack(anchor="w", padx=16, pady=(6,10))
+
+        self._stats = {"total":0, "by_ssid":{}, "by_mac":{}, "closest":{"mac":"","rssi":-999,"ssid":"-","vendor":"[Unknown]"},
+                       "probes_directed":0, "probes_broadcast":0}
+        self._last  = []
+
+        self.root.after(200, self.tick)
+
+    # helpers
+    @staticmethod
+    def trunc(s, w):
+        s = str(s)
+        return s if len(s) <= w else s[:max(0,w-1)] + "…"
+
+    def update_data(self):
+        try:
+            while True:
+                tag, stats, last = self.bus.get_nowait()
+                if tag == "stats":
+                    self._stats = stats
+                    self._last  = last
+        except queue.Empty:
+            pass
+
+    def render(self):
+        s = self._stats
+        total   = s.get("total",0)
+        by_ssid = s.get("by_ssid",{})
+        by_mac  = s.get("by_mac",{})
+        closest = s.get("closest",{"mac":"", "rssi":-999, "ssid":"", "vendor":"[Unknown]"})
+        p_dir   = s.get("probes_directed",0)
+        p_brd   = s.get("probes_broadcast",0)
+
+        # Header
+        hdr = f"Wi-Fi Radar  |  iface: {ALFA_IFACE} (monitor)  |  total hits: {total}"
+        self.title.configure(text=self.trunc(hdr, HUD_COLS))
+
+        # Closest banner
+        band = "very close" if closest["rssi"] >= -45 else ("near" if closest["rssi"] >= -60 else ("far" if closest["rssi"] >= -75 else "very far"))
+        cline = f"Closest Device: RSSI {closest['rssi']:>3}   {closest['mac']}   {self.trunc(closest['vendor'],18):<18}   SSID: {self.trunc(closest['ssid'],18):<18}   • {band}"
+        self.closest.configure(text=self.trunc(cline, HUD_COLS))
+
+        # Probe counters
+        self.counters.configure(text=f"Probes  Directed: {p_dir}   Broadcast: {p_brd}")
+
+        # Top SSIDs
+        top_ssid = sorted(by_ssid.items(), key=lambda x:-x[1])[:8]
+        ss = ["Top SSIDs:"]
+        if not top_ssid:
+            ss.append("  (none yet)")
+        else:
+            for name, c in top_ssid:
+                ss.append(f"  {self.trunc(name, 24):<24} {c:>5}")
+        self.block1.configure(text="\n".join(ss))
+
+        # Top MACs (fixed columns)
+        top_mac = sorted(by_mac.items(), key=lambda x:-x[1]["hits"])[:8]
+        mm = ["Top MACs:"]
+        if not top_mac:
+            mm.append("  (none yet)")
+        else:
+            for mac, st in top_mac:
+                hits  = st.get("hits",0)
+                rssi  = st.get("last_rssi","")
+                ssid  = self.trunc(st.get("last_ssid","-"), 12)
+                vend  = self.trunc(st.get("vendor","[Unknown]"), 12)
+                mm.append(f"  {mac:<17} {hits:>4}  {str(rssi):>4}  {ssid:<12}  [{vend:<12}]")
+        self.block2.configure(text="\n".join(mm))
+
+        # Last Hits (fixed columns)
+        lh = ["Last Hits:"]
+        if not self._last:
+            lh.append("  (waiting…)")
+        else:
+            for ts, rssi, kind, ssid, mac, vend in self._last:
+                lh.append(f"  {ts[5:19]}  RSSI={str(rssi):>3}  {self.trunc(kind,8):<8}  {self.trunc(ssid,10):<10}  ({mac})  [{self.trunc(vend,10):<10}]")
+        self.block3.configure(text="\n".join(lh))
+
+    def tick(self):
+        self.update_data()
+        self.render()
+        self.root.after(350, self.tick)
+
+    def run(self):
+        self.root.mainloop()
+
+# ---------- START / STOP ----------
+def start_flow(show_hud=True):
+    print("=== Wi-Fi Radar START (monitor-only + HDMI HUD) ===")
+    ensure_dirs()
+
+    snap = iface_info(ALFA_IFACE)
+    print(f"[snapshot] {ALFA_IFACE}: {snap}")
+
+    if run("which nmcli", check=False).returncode == 0:
+        print("[nmcli] unmanaging Alfa; leaving onboard managed")
+        run(f"nmcli device set {ALFA_IFACE} managed no", check=False)
+
+    set_updown(ALFA_IFACE, True)
+    set_type(ALFA_IFACE, "monitor")
+
+    pcap_proc = start_pcap(ALFA_IFACE, PCAP_PATH)
+
+    target_mac = input("Target MAC to alert on (blank=ANY): ").strip()
+    ssid_filter= input("Filter ProbeReq by SSID (blank=ANY): ").strip()
+
+    hud_bus = queue.Queue(maxsize=8)
+    det_thr = threading.Thread(target=start_detector,
+                               args=(ALFA_IFACE, target_mac, ssid_filter, CSV_PATH, hud_bus),
+                               daemon=True)
+    det_thr.start()
+
+    print("\n[RUNNING]")
+    print(f"  Monitor iface : {ALFA_IFACE} (monitor mode)")
+    print(f"  Onboard iface : {ONBOARD_IFACE} (left alone; keep your internet)")
+    print(f"  PCAP          : {PCAP_PATH}")
+    print(f"  CSV           : {CSV_PATH}")
+    print("  Press Ctrl+C or run: sudo python3 wifi_radar.py stop")
+
+    STATE_PATH.write_text(str(pcap_proc.pid))
+
+    try:
+        if show_hud and "DISPLAY" in os.environ:
+            HUD(hud_bus).run()
+        else:
+            if show_hud: print("[hud] DISPLAY not set; running headless.")
+            while True: time.sleep(2)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_flow(snapshot=snap)
+
+def stop_flow(snapshot=None):
+    print("\n=== Wi-Fi Radar STOP ===")
+    if STATE_PATH.exists():
+        try:
+            pid = int(STATE_PATH.read_text().strip())
+            print(f"[stop] killing tcpdump pid={pid}")
+            os.kill(pid, signal.SIGTERM)
+        except Exception as e:
+            print(f"[stop] warn: {e}")
+        try: STATE_PATH.unlink()
+        except: pass
+
+    snap = snapshot or iface_info(ALFA_IFACE)
+    cur  = iface_info(ALFA_IFACE)
+    want_type = snap.get("type") or "managed"
+    want_up   = (snap.get("state") == "UP")
+    if cur["type"] != want_type:
+        print(f"[restore] {ALFA_IFACE} type {cur['type']} -> {want_type}")
+        set_type(ALFA_IFACE, want_type)
+    if (cur["state"]=="UP") != want_up:
+        print(f"[restore] {ALFA_IFACE} state {cur['state']} -> {'UP' if want_up else 'DOWN'}")
+        set_updown(ALFA_IFACE, want_up)
+
+    if run("which nmcli", check=False).returncode == 0:
+        run(f"nmcli device set {ALFA_IFACE} managed yes", check=False)
+
+    print(f"[stop] PCAP at: {PCAP_PATH}")
+    print("[stop] done.")
+
+def main():
+    require_root()
+    ensure_dirs()
+    if len(sys.argv) < 2:
+        print(f"Usage:\n  sudo python3 {Path(__file__).name} start [--nohud]\n  sudo python3 {Path(__file__).name} stop")
+        return
+    cmd = sys.argv[1].lower()
+    show_hud = SHOW_HUD_DEFAULT and ("--nohud" not in sys.argv[2:])
+    if cmd == "start":
+        start_flow(show_hud=show_hud)
+    elif cmd == "stop":
+        stop_flow()
+    else:
+        print("Unknown command. Use start/stop.")
+
+if __name__ == "__main__":
+    main()

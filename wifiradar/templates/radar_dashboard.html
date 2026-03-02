@@ -6,12 +6,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Wi-Fi Radar — Live Dashboard</title>
 
-  <!-- Leaflet map CSS and JS -->
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!-- Local assets — works offline, no CDN required -->
+  <link rel="stylesheet" href="/css/leaflet.css" />
+  <script src="/js/leaflet.js"></script>
+  <script src="/js/chart.js"></script>
 
   <style>
     :root {
@@ -319,9 +317,9 @@
       align-items: center;
       gap: 6px;
       padding: 8px 18px;
-      background: rgba(255,23,68,.15);
+      background: rgba(255, 23, 68, .15);
       color: var(--red);
-      border: 1px solid rgba(255,23,68,.4);
+      border: 1px solid rgba(255, 23, 68, .4);
       border-radius: 6px;
       font-size: 13px;
       font-weight: 700;
@@ -330,11 +328,16 @@
       letter-spacing: .3px;
       transition: background .2s, border-color .2s, transform .1s;
     }
+
     #stop-btn:hover {
-      background: rgba(255,23,68,.3);
+      background: rgba(255, 23, 68, .3);
       border-color: var(--red);
     }
-    #stop-btn:active { transform: scale(.96); }
+
+    #stop-btn:active {
+      transform: scale(.96);
+    }
+
     #stop-btn:disabled {
       opacity: .5;
       cursor: not-allowed;
@@ -345,21 +348,24 @@
       display: none;
       position: fixed;
       inset: 0;
-      background: rgba(0,0,0,.75);
+      background: rgba(0, 0, 0, .75);
       z-index: 10000;
       align-items: center;
       justify-content: center;
       flex-direction: column;
       gap: 16px;
     }
+
     #shutdown-overlay.show {
       display: flex;
     }
+
     #shutdown-overlay .msg {
       font-size: 22px;
       font-weight: 700;
       color: var(--red);
     }
+
     #shutdown-overlay .sub {
       font-size: 14px;
       color: var(--text-dim);
@@ -384,7 +390,8 @@
         <span>· Channel <span id="current-channel" style="color:var(--accent); font-weight:bold;">?</span></span>
         <span>· Refreshing every 3s</span>
       </div>
-      <button id="stop-btn" data-tooltip="Gracefully stop the radar engine and restore the Wi-Fi adapter" onclick="stopRadar()">⏹ Stop Radar</button>
+      <button id="stop-btn" data-tooltip="Gracefully stop the radar engine and restore the Wi-Fi adapter"
+        onclick="stopRadar()">⏹ Stop Radar</button>
     </div>
   </div>
 
