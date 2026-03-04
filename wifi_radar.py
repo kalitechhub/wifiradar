@@ -320,25 +320,17 @@ def start_pcap(iface, path):
 # ---------- CHANNEL HOPPER ----------
 # Export current channel for the dashboard
 _current_channel = "?"
-_auto_lock_channel = None
 
 def get_current_channel():
     return _current_channel
 
 def channel_hopper(iface):
     """Cycle through 2.4GHz + 5GHz Wi-Fi channels until shutdown is signalled."""
-    global _current_channel, _auto_lock_channel
+    global _current_channel
     try:
         idx = 0
         fail_count = {}
         while not _shutdown.is_set():
-            if _auto_lock_channel:
-                ch = _auto_lock_channel
-                run(f"iw dev {iface} set channel {ch}", check=False, capture=True, quiet=True)
-                _current_channel = str(ch)
-                _shutdown.wait(1.0)
-                continue
-
             ch = HOP_CHANNELS[idx % len(HOP_CHANNELS)]
             result = run(f"iw dev {iface} set channel {ch}", check=False, capture=True, quiet=True)
             if result.returncode != 0:
@@ -459,7 +451,7 @@ def start_detector(iface, target_mac, ssid_filter, csv_path, json_path,
             log.error(f"Packet handler error:\n{traceback.format_exc()}")
 
     def _handle_inner(pkt):
-        global _auto_lock_channel
+
         if _shutdown.is_set(): return
         if not want(pkt): return
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -470,11 +462,6 @@ def start_detector(iface, target_mac, ssid_filter, csv_path, json_path,
         sig = rssi(pkt)
         sig_str = str(sig) if sig is not None else "?"
         chan = freq_to_chan(get_channel(pkt))
-
-        # Auto-lock onto channel if this is a targeted Fox Hunt
-        if ssidflt and not _auto_lock_channel and isinstance(chan, int):
-            _auto_lock_channel = chan
-            print(f"\n[foxhunt] Target '{ssid}' intercepted! Auto-locking hopper to channel {chan}!")
 
         # probe counters
         if subtype == (0,4):
@@ -664,15 +651,9 @@ def start_flow(target_channel=None):
     sess_engine  = SessionEngine()
     print("[engines] Fingerprint + Cluster + Session engines initialized.")
 
-    # Start channel hopper thread OR lock channel
-    global _current_channel
-    if target_channel:
-        print(f"[hop] Locking adapter to channel: {target_channel} (Targeted Fox Hunt)")
-        run(f"iw dev {ALFA_IFACE} set channel {target_channel}", check=False)
-        _current_channel = str(target_channel)
-    else:
-        hop_thr = threading.Thread(target=channel_hopper, args=(ALFA_IFACE,), daemon=True)
-        hop_thr.start()
+    # Always channel-hop so we catch devices on any channel
+    hop_thr = threading.Thread(target=channel_hopper, args=(ALFA_IFACE,), daemon=True)
+    hop_thr.start()
 
     # Start detector thread
     det_thr = threading.Thread(target=start_detector,
@@ -690,10 +671,7 @@ def start_flow(target_channel=None):
     print("\n[RUNNING]")
     print(f"  Monitor iface : {ALFA_IFACE} (monitor mode)")
     print(f"  Onboard iface : {ONBOARD_IFACE} (left alone; keep your internet)")
-    if target_channel:
-        print(f"  Target Channel: {target_channel} (LOCKED)")
-    else:
-        print(f"  Channel hop   : ch {HOP_CHANNELS[0]}–{HOP_CHANNELS[-1]} ({len(HOP_CHANNELS_24)} x 2.4GHz + {len(HOP_CHANNELS_5)} x 5GHz) every {HOP_INTERVAL}s")
+    print(f"  Channel hop   : ch {HOP_CHANNELS[0]}–{HOP_CHANNELS[-1]} ({len(HOP_CHANNELS_24)} x 2.4GHz + {len(HOP_CHANNELS_5)} x 5GHz) every {HOP_INTERVAL}s")
     print(f"  PCAP          : {PCAP_PATH}")
     print(f"  CSV           : {CSV_PATH}")
     print(f"  JSON          : {JSON_PATH}")
