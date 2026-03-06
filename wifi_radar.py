@@ -440,8 +440,16 @@ def start_detector(iface, target_mac, ssid_filter, csv_path, json_path,
             macs = [pkt.addr1, pkt.addr2, pkt.addr3]
             if not any(m and m.lower()==target for m in macs): return False
         if ssidflt:
-            if get_ssid(pkt).strip().lower() != ssidflt.lower():
-                return False
+            ssid_in_pkt = get_ssid(pkt).strip()
+            is_probe = (pkt.type == 0 and pkt.subtype == 4)  # ProbeReq
+            is_broadcast_probe = is_probe and ssid_in_pkt == ""
+            # Accept broadcast ProbeReq frames — a probing-only device (Wi-Fi on
+            # but not connected) sends both directed probes (with SSID) and
+            # broadcast probes (empty SSID). We let both through so we detect
+            # every device with Wi-Fi enabled, not just connected ones.
+            if not is_broadcast_probe:
+                if ssid_in_pkt.lower() != ssidflt.lower():
+                    return False
         return True
 
     def handle(pkt):
@@ -549,39 +557,36 @@ def start_detector(iface, target_mac, ssid_filter, csv_path, json_path,
     # BPF filter: only management frames (type 0)
     # "type mgt" isn't supported on all systems, so fall back to no filter.
     # OSError errno 100 (ENETDOWN) can occur when the adapter is transitioning
-    # into monitor mode while offline — we retry with a short back-off.
+    # into monitor mode — we retry indefinitely with a short back-off so the
+    # detector never permanently stops due to a transient adapter hiccup.
     import errno as _errno
-    MAX_RETRIES = 5
-    for attempt in range(MAX_RETRIES):
-        if _shutdown.is_set():
-            break
+    _use_bpf = True   # try BPF filter first; set False if unsupported
+    attempt  = 0
+    while not _shutdown.is_set():
+        attempt += 1
         try:
-            sniff(iface=iface, prn=handle, store=False,
-                  filter="wlan type mgt",
-                  stop_filter=lambda _: _shutdown.is_set())
-            break  # clean exit
-        except Scapy_Exception:
-            # BPF compile failed – retry without filter (handler already
-            # checks for Dot11 management frames, so this is safe)
-            print("[sniff] BPF 'type mgt' not supported, restarting without BPF filter…")
-            try:
+            if _use_bpf:
+                sniff(iface=iface, prn=handle, store=False,
+                      filter="wlan type mgt",
+                      stop_filter=lambda _: _shutdown.is_set())
+            else:
                 sniff(iface=iface, prn=handle, store=False,
                       stop_filter=lambda _: _shutdown.is_set())
-                break  # clean exit
-            except OSError as e:
-                if e.errno == _errno.ENETDOWN:
-                    print(f"[sniff] Network down (errno 100), retrying in 2 s… (attempt {attempt+1}/{MAX_RETRIES})")
-                    _shutdown.wait(2)
-                else:
-                    log.error(f"Detector sniff crashed:\n{traceback.format_exc()}")
-                    break
-            except Exception:
-                log.error(f"Detector sniff crashed:\n{traceback.format_exc()}")
-                break
+            break  # clean exit (shutdown was set)
+        except Scapy_Exception:
+            # BPF compile failed — disable BPF and restart immediately
+            if _use_bpf:
+                print("[sniff] BPF 'wlan type mgt' not supported; switching to no-filter mode")
+                _use_bpf = False
+                continue  # retry right away without filter
+            # Should not reach here, but guard anyway
+            log.error(f"Detector sniff crashed (Scapy):\n{traceback.format_exc()}")
+            break
         except OSError as e:
             if e.errno == _errno.ENETDOWN:
-                print(f"[sniff] Network down (errno 100), retrying in 2 s… (attempt {attempt+1}/{MAX_RETRIES})")
+                print(f"[sniff] Network down (errno 100), retrying in 2 s… (attempt {attempt})")
                 _shutdown.wait(2)
+                # loop continues — no retry cap
             else:
                 log.error(f"Detector sniff crashed:\n{traceback.format_exc()}")
                 break
